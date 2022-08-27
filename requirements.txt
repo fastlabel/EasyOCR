@@ -7,6 +7,10 @@ Pillow
 scikit-image
 python-bidi
 PyYAML
+tqdm
+natsort
+pandas
+nltk
 Shapely
 pyclipper
 ninja

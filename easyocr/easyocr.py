@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from .recognition import get_recognizer, get_text
-from .utils import group_text_box, get_image_list, calculate_md5, get_paragraph,\
+from .utils import get_image_list_vertical, group_text_box, group_text_box_vertical, get_image_list, calculate_md5, get_paragraph,\
                    download_and_unzip, printProgressBar, diff, reformat_input,\
                    make_rotated_img_list, set_result_with_confidence,\
                    reformat_input_batched
@@ -189,11 +189,17 @@ class Reader(object):
         else: # user-defined model
             with open(os.path.join(self.user_network_directory, recog_network+ '.yaml'), encoding='utf8') as file:
                 recog_config = yaml.load(file, Loader=yaml.FullLoader)
-            
+
             global imgH # if custom model, save this variable. (from *.yaml)
-            if recog_config['imgH']:
+            if 'imgH' in recog_config and recog_config['imgH']:
                 imgH = recog_config['imgH']
-                
+
+            global imgW # if custom model, save this variable. (from *.yaml)
+            if 'imgW' in recog_config and recog_config['imgW']:
+                imgW = recog_config['imgW']
+
+            self.vertical = recog_config['network_params']['direction'] == 'Vertical'
+
             available_lang = recog_config['lang_list']
             self.setModelLanguage(recog_network, lang_list, available_lang, str(available_lang))
             #char_file = os.path.join(self.user_network_directory, recog_network+ '.txt')
@@ -333,10 +339,18 @@ class Reader(object):
 
         horizontal_list_agg, free_list_agg = [], []
         for text_box in text_box_list:
-            horizontal_list, free_list = group_text_box(text_box, slope_ths,
-                                                        ycenter_ths, height_ths,
-                                                        width_ths, add_margin,
-                                                        (optimal_num_chars is None))
+
+            if not self.vertical:
+                horizontal_list, free_list = group_text_box(text_box, slope_ths,
+                                                            ycenter_ths, height_ths,
+                                                            width_ths, add_margin,
+                                                            (optimal_num_chars is None))
+            else:
+                horizontal_list, free_list = group_text_box_vertical(text_box, slope_ths,
+                                                            ycenter_ths, height_ths,
+                                                            width_ths, add_margin,
+                                                            (optimal_num_chars is None))
+
             if min_size:
                 horizontal_list = [i for i in horizontal_list if max(
                     i[1] - i[0], i[3] - i[2]) > min_size]
@@ -349,7 +363,7 @@ class Reader(object):
 
     def recognize(self, img_cv_grey, horizontal_list=None, free_list=None,\
                   decoder = 'greedy', beamWidth= 5, batch_size = 1,\
-                  workers = 0, allowlist = None, blocklist = None, detail = 1,\
+                  workers = 0, allowlist = None, blocklist = '', detail = 1,\
                   rotation_info = None,paragraph = False,\
                   contrast_ths = 0.1,adjust_contrast = 0.5, filter_ths = 0.003,\
                   y_ths = 0.5, x_ths = 1.0, reformat=True, output_format='standard'):
@@ -357,9 +371,9 @@ class Reader(object):
         if reformat:
             img, img_cv_grey = reformat_input(img_cv_grey)
 
-        if allowlist:
+        if allowlist is not None:
             ignore_char = ''.join(set(self.character)-set(allowlist))
-        elif blocklist:
+        elif blocklist is not None:
             ignore_char = ''.join(set(blocklist))
         else:
             ignore_char = ''.join(set(self.character)-set(self.lang_char))
@@ -377,33 +391,50 @@ class Reader(object):
             for bbox in horizontal_list:
                 h_list = [bbox]
                 f_list = []
-                image_list, max_width = get_image_list(h_list, f_list, img_cv_grey, model_height = imgH)
-                result0 = get_text(self.character, imgH, int(max_width), self.recognizer, self.converter, image_list,\
+
+                if self.vertical:
+                    img_w = imgW
+                    image_list, max_height = get_image_list_vertical(h_list, f_list, img_cv_grey, model_width = img_w)
+                    img_h = int(max_height)
+                else:
+                    img_h = imgH
+                    image_list, max_width = get_image_list(h_list, f_list, img_cv_grey, model_height = img_h)
+                    img_w = int(max_width)
+
+                result0 = get_text(self.character, img_h, img_w, self.recognizer, self.converter, image_list,\
                               ignore_char, decoder, beamWidth, batch_size, contrast_ths, adjust_contrast, filter_ths,\
                               workers, self.device)
                 result += result0
             for bbox in free_list:
                 h_list = []
                 f_list = [bbox]
-                image_list, max_width = get_image_list(h_list, f_list, img_cv_grey, model_height = imgH)
-                result0 = get_text(self.character, imgH, int(max_width), self.recognizer, self.converter, image_list,\
+                image_list, max_width = get_image_list(h_list, f_list, img_cv_grey, model_height = img_h)
+                result0 = get_text(self.character, img_h, img_w, self.recognizer, self.converter, image_list,\
                               ignore_char, decoder, beamWidth, batch_size, contrast_ths, adjust_contrast, filter_ths,\
                               workers, self.device)
                 result += result0
         # default mode will try to process multiple boxes at the same time
         else:
-            image_list, max_width = get_image_list(horizontal_list, free_list, img_cv_grey, model_height = imgH)
+            if self.vertical:
+                img_w = imgW
+                image_list, max_height = get_image_list_vertical(horizontal_list, free_list, img_cv_grey, model_width = img_w)
+                img_h = int(max_height)
+            else:
+                img_h = imgH
+                image_list, max_width = get_image_list(horizontal_list, free_list, img_cv_grey, model_height = img_h)
+                img_w = int(max_width)
+
             image_len = len(image_list)
             if rotation_info and image_list:
                 image_list = make_rotated_img_list(rotation_info, image_list)
-                max_width = max(max_width, imgH)
+                max_width = max(max_width, img_h)
 
-            result = get_text(self.character, imgH, int(max_width), self.recognizer, self.converter, image_list,\
+            result = get_text(self.character, img_h, img_w, self.recognizer, self.converter, image_list,\
                           ignore_char, decoder, beamWidth, batch_size, contrast_ths, adjust_contrast, filter_ths,\
                           workers, self.device)
 
             if rotation_info and (horizontal_list+free_list):
-                # Reshape result to be a list of lists, each row being for 
+                # Reshape result to be a list of lists, each row being for
                 # one of the rotations (first row being no rotation)
                 result = set_result_with_confidence(
                     [result[image_len*i:image_len*(i+1)] for i in range(len(rotation_info) + 1)])
@@ -427,7 +458,7 @@ class Reader(object):
             return result
 
     def readtext(self, image, decoder = 'greedy', beamWidth= 5, batch_size = 1,\
-                 workers = 0, allowlist = None, blocklist = None, detail = 1,\
+                 workers = 0, allowlist = None, blocklist = '', detail = 1,\
                  rotation_info = None, paragraph = False, min_size = 20,\
                  contrast_ths = 0.1,adjust_contrast = 0.5, filter_ths = 0.003,\
                  text_threshold = 0.7, low_text = 0.4, link_threshold = 0.4,\
@@ -461,9 +492,9 @@ class Reader(object):
                                 filter_ths, y_ths, x_ths, False, output_format)
 
         return result
-    
+
     def readtextlang(self, image, decoder = 'greedy', beamWidth= 5, batch_size = 1,\
-                 workers = 0, allowlist = None, blocklist = None, detail = 1,\
+                 workers = 0, allowlist = None, blocklist = '', detail = 1,\
                  rotation_info = None, paragraph = False, min_size = 20,\
                  contrast_ths = 0.1,adjust_contrast = 0.5, filter_ths = 0.003,\
                  text_threshold = 0.7, low_text = 0.4, link_threshold = 0.4,\
@@ -495,12 +526,12 @@ class Reader(object):
                                 workers, allowlist, blocklist, detail, rotation_info,\
                                 paragraph, contrast_ths, adjust_contrast,\
                                 filter_ths, y_ths, x_ths, False, output_format)
-       
+
         char = []
         directory = 'characters/'
         for i in range(len(result)):
             char.append(result[i][1])
-        
+
         def search(arr,x):
             g = False
             for i in range(len(arr)):
@@ -513,11 +544,11 @@ class Reader(object):
             a = result[i]
             b = a + (filename[0:2],)
             return b
-        
+
         for filename in os.listdir(directory):
             if filename.endswith(".txt"):
-                with open ('characters/'+ filename,'rt',encoding="utf8") as myfile:  
-                    chartrs = str(myfile.read().splitlines()).replace('\n','') 
+                with open ('characters/'+ filename,'rt',encoding="utf8") as myfile:
+                    chartrs = str(myfile.read().splitlines()).replace('\n','')
                     for i in range(len(char)):
                         res = search(chartrs,char[i])
                         if res != -1:
@@ -526,7 +557,7 @@ class Reader(object):
 
     def readtext_batched(self, image, n_width=None, n_height=None,\
                          decoder = 'greedy', beamWidth= 5, batch_size = 1,\
-                         workers = 0, allowlist = None, blocklist = None, detail = 1,\
+                         workers = 0, allowlist = None, blocklist = '', detail = 1,\
                          rotation_info = None, paragraph = False, min_size = 20,\
                          contrast_ths = 0.1,adjust_contrast = 0.5, filter_ths = 0.003,\
                          text_threshold = 0.7, low_text = 0.4, link_threshold = 0.4,\
