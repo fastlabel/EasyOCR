@@ -11,3 +11,6 @@ tqdm
 natsort
 pandas
 nltk
+Shapely
+pyclipper
+ninja
