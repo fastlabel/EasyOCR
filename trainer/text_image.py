@@ -5,6 +5,7 @@ from PIL import Image, ImageDraw, ImageFont
 class TextImage():
     """テキスト画像生成クラス
     NOTE:縦書き(vert=True)の場合は、斜体と下付き線は正常に動作しない
+    NOTE:apt install libraqm-dev Pillow>=8.0が必要
     """
 
     def __init__(self, text, font_path, text_color=(0,0,0),
