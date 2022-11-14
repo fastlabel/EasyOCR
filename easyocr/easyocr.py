@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 
 from .recognition import get_recognizer, get_text
-from .utils import get_image_list_vertical, group_text_box, group_text_box_vertical, get_image_list, calculate_md5, get_paragraph,\
+from .utils import get_image_list_vertical, group_text_box, group_text_box_vertical, get_horizontal_text_and_free_list, get_free_list, get_image_list, calculate_md5, get_paragraph,\
                    download_and_unzip, printProgressBar, diff, reformat_input,\
                    make_rotated_img_list, set_result_with_confidence,\
                    reformat_input_batched
 from .config import *
+from .model.refine_net import RefineNet
+from .detection import copyStateDict
 from bidi.algorithm import get_display
 import numpy as np
 import cv2
 import torch
+from torch import load as torch_load
+from torch.nn import DataParallel as torch_DataParallel
 import os
 import sys
 from PIL import Image
@@ -31,7 +35,7 @@ class Reader(object):
     def __init__(self, lang_list, gpu=True, model_storage_directory=None,
                  user_network_directory=None, detect_network="craft", 
                  recog_network='standard', download_enabled=True, 
-                 detector=True, recognizer=True, verbose=True, 
+                 detector=True, refiner=False, recognizer=True, verbose=True, 
                  quantize=True, cudnn_benchmark=False):
         """Create an EasyOCR Reader
 
@@ -86,6 +90,8 @@ class Reader(object):
         self.cudnn_benchmark=cudnn_benchmark
         if detector:
             detector_path = self.getDetectorPath(detect_network)
+        
+        self.refine_net = None
         
         # recognition model
         separator_list = {}
@@ -186,6 +192,8 @@ class Reader(object):
                     LOGGER.info('Download complete')
             self.setLanguageList(lang_list, model)
 
+            self.vertical = False
+
         else: # user-defined model
             with open(os.path.join(self.user_network_directory, recog_network+ '.yaml'), encoding='utf8') as file:
                 recog_config = yaml.load(file, Loader=yaml.FullLoader)
@@ -214,7 +222,25 @@ class Reader(object):
 
         if detector:
             self.detector = self.initDetector(detector_path)
-            
+        
+        if refiner:
+            weight_path = os.path.join(self.model_storage_directory, 'craft_refiner_CTW1500.pth')
+            refine_net = RefineNet()  # initialize
+
+            # arrange device
+            if gpu:
+                refine_net.load_state_dict(copyStateDict(torch_load(weight_path)))
+
+                refine_net = refine_net.cuda()
+                refine_net = torch_DataParallel(refine_net)
+                cudnn_benchmark = False
+            else:
+                refine_net.load_state_dict(
+                    copyStateDict(torch_load(weight_path, map_location="cpu"))
+                )
+            refine_net.eval()
+            self.refine_net = refine_net
+
         if recognizer:
             if recog_network == 'generation1':
                 network_params = {
@@ -316,6 +342,7 @@ class Reader(object):
                slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                width_ths = 0.5, add_margin = 0.1, reformat=True, optimal_num_chars=None,
                threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
+               postprocess='org'
                ):
 
         if reformat:
@@ -335,21 +362,28 @@ class Reader(object):
                                     bbox_min_score = bbox_min_score, 
                                     bbox_min_size = bbox_min_size, 
                                     max_candidates = max_candidates,
+                                    refine_net=self.refine_net,
                                     )
 
         horizontal_list_agg, free_list_agg = [], []
         for text_box in text_box_list:
-
-            if not self.vertical:
-                horizontal_list, free_list = group_text_box(text_box, slope_ths,
-                                                            ycenter_ths, height_ths,
-                                                            width_ths, add_margin,
-                                                            (optimal_num_chars is None))
+            if postprocess == 'org':
+                if not self.vertical:
+                    horizontal_list, free_list = group_text_box(text_box, slope_ths,
+                                                                ycenter_ths, height_ths,
+                                                                width_ths, add_margin,
+                                                                (optimal_num_chars is None))
+                else:
+                    horizontal_list, free_list = group_text_box_vertical(text_box, slope_ths,
+                                                                ycenter_ths, height_ths,
+                                                                width_ths, add_margin,
+                                                                (optimal_num_chars is None))
+            elif postprocess == 'not_combine':
+                horizontal_list, free_list = get_horizontal_text_and_free_list(text_box, slope_ths, add_margin, (optimal_num_chars is None))
+            elif postprocess == 'poly_only':
+                horizontal_list, free_list = get_free_list(text_box, add_margin)
             else:
-                horizontal_list, free_list = group_text_box_vertical(text_box, slope_ths,
-                                                            ycenter_ths, height_ths,
-                                                            width_ths, add_margin,
-                                                            (optimal_num_chars is None))
+                raise ValueError()
 
             if min_size:
                 horizontal_list = [i for i in horizontal_list if max(

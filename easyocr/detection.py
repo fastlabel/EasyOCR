@@ -6,9 +6,11 @@ from collections import OrderedDict
 
 import cv2
 import numpy as np
+from torch import no_grad as torch_no_grad
 from .craft_utils import getDetBoxes, adjustResultCoordinates
 from .imgproc import resize_aspect_ratio, normalizeMeanVariance
 from .craft import CRAFT
+
 
 def copyStateDict(state_dict):
     if list(state_dict.keys())[0].startswith("module"):
@@ -21,7 +23,10 @@ def copyStateDict(state_dict):
         new_state_dict[name] = v
     return new_state_dict
 
-def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold, low_text, poly, device, estimate_num_chars=False):
+def test_net(
+    canvas_size, mag_ratio, net, image, text_threshold, link_threshold, low_text, poly, device,
+    estimate_num_chars=False, refine_net=None
+):
     if isinstance(image, np.ndarray) and len(image.shape) == 4:  # image is batch of np arrays
         image_arrs = image
     else:                                                        # image is single numpy array
@@ -34,6 +39,8 @@ def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold,
                                                                       interpolation=cv2.INTER_LINEAR,
                                                                       mag_ratio=mag_ratio)
         img_resized_list.append(img_resized)
+        # cv2.imwrite('resized.jpg', img_resized)
+
     ratio_h = ratio_w = 1 / target_ratio
     # preprocessing
     x = [np.transpose(normalizeMeanVariance(n_img), (2, 0, 1))
@@ -50,6 +57,12 @@ def test_net(canvas_size, mag_ratio, net, image, text_threshold, link_threshold,
         # make score and link map
         score_text = out[:, :, 0].cpu().data.numpy()
         score_link = out[:, :, 1].cpu().data.numpy()
+
+        # Add for refinenet
+        if refine_net is not None:
+            with torch_no_grad():
+                y_refiner = refine_net(y, feature)
+            score_link = y_refiner[0, :, :, 0].cpu().data.numpy()
 
         # Post-processing
         boxes, polys, mapper = getDetBoxes(
@@ -89,13 +102,17 @@ def get_detector(trained_model, device='cpu', quantize=True, cudnn_benchmark=Fal
     net.eval()
     return net
 
-def get_textbox(detector, image, canvas_size, mag_ratio, text_threshold, link_threshold, low_text, poly, device, optimal_num_chars=None, **kwargs):
+def get_textbox(
+    detector, image, canvas_size, mag_ratio, text_threshold, link_threshold, low_text, poly, device,
+    optimal_num_chars=None, refine_net=None,
+    **kwargs
+):
     result = []
     estimate_num_chars = optimal_num_chars is not None
     bboxes_list, polys_list = test_net(canvas_size, mag_ratio, detector,
                                        image, text_threshold,
                                        link_threshold, low_text, poly,
-                                       device, estimate_num_chars)
+                                       device, estimate_num_chars, refine_net)
     if estimate_num_chars:
         polys_list = [[p for p, _ in sorted(polys, key=lambda x: abs(optimal_num_chars - x[1]))]
                       for polys in polys_list]
