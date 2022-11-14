@@ -225,6 +225,9 @@ class Reader(object):
         
         if refiner:
             weight_path = os.path.join(self.model_storage_directory, 'craft_refiner_CTW1500.pth')
+            if not os.path.exists(weight_path):
+                weight_path = os.path.join(MODULE_PATH, 'model', 'craft_refiner_CTW1500.pth')
+            
             refine_net = RefineNet()  # initialize
 
             # arrange device
