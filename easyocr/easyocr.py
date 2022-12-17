@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 
 from .recognition import get_recognizer, get_text
-from .utils import get_image_list_vertical, group_text_box, group_text_box_vertical, get_image_list, calculate_md5, get_paragraph,\
-                   download_and_unzip, printProgressBar, diff, reformat_input,\
+from .utils import get_image_list_vertical, group_text_box, group_text_box_vertical, group_text_box_vertical_custom1, \
+                   group_text_box_vertical_custom2, get_horizontal_text_and_free_list, get_free_list, get_image_list, calculate_md5, \
+                   get_paragraph, download_and_unzip, printProgressBar, diff, reformat_input,\
                    make_rotated_img_list, set_result_with_confidence,\
                    reformat_input_batched
 from .config import *
@@ -31,7 +32,7 @@ class Reader(object):
     def __init__(self, lang_list, gpu=True, model_storage_directory=None,
                  user_network_directory=None, detect_network="craft", 
                  recog_network='standard', download_enabled=True, 
-                 detector=True, recognizer=True, verbose=True, 
+                 detector=True, refiner=False, recognizer=True, verbose=True, 
                  quantize=True, cudnn_benchmark=False):
         """Create an EasyOCR Reader
 
@@ -186,6 +187,8 @@ class Reader(object):
                     LOGGER.info('Download complete')
             self.setLanguageList(lang_list, model)
 
+            self.vertical = False
+
         else: # user-defined model
             with open(os.path.join(self.user_network_directory, recog_network+ '.yaml'), encoding='utf8') as file:
                 recog_config = yaml.load(file, Loader=yaml.FullLoader)
@@ -315,7 +318,8 @@ class Reader(object):
                link_threshold = 0.4,canvas_size = 2560, mag_ratio = 1.,\
                slope_ths = 0.1, ycenter_ths = 0.5, height_ths = 0.5,\
                width_ths = 0.5, add_margin = 0.1, reformat=True, optimal_num_chars=None,
-               threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0,
+               threshold = 0.2, bbox_min_score = 0.2, bbox_min_size = 3, max_candidates = 0, 
+               postprocess='org', vertical=False,
                ):
 
         if reformat:
@@ -335,21 +339,44 @@ class Reader(object):
                                     bbox_min_score = bbox_min_score, 
                                     bbox_min_size = bbox_min_size, 
                                     max_candidates = max_candidates,
+                                    vertical = vertical,
                                     )
 
         horizontal_list_agg, free_list_agg = [], []
         for text_box in text_box_list:
+            if postprocess == 'org':
+                if self.vertical or vertical:
+                    horizontal_list, free_list = group_text_box_vertical(text_box, slope_ths,
+                                                                         ycenter_ths, height_ths,
+                                                                         width_ths, add_margin,
+                                                                         (optimal_num_chars is None))
+                else:
+                    horizontal_list, free_list = group_text_box(text_box, slope_ths,
+                                                                ycenter_ths, height_ths,
+                                                                width_ths, add_margin,
+                                                                (optimal_num_chars is None))
 
-            if not self.vertical:
-                horizontal_list, free_list = group_text_box(text_box, slope_ths,
-                                                            ycenter_ths, height_ths,
-                                                            width_ths, add_margin,
-                                                            (optimal_num_chars is None))
+            elif postprocess == 'not_combine':
+                horizontal_list, free_list = get_horizontal_text_and_free_list(text_box, slope_ths, add_margin, (optimal_num_chars is None))
+            elif postprocess == 'poly_only':
+                horizontal_list, free_list = get_free_list(text_box, add_margin)
+            elif vertical and postprocess == 'vertical_custom1':  # doesn't work...
+                xcenter_ths = 0.3
+                height_ths = 0.5
+                width_ths = 0.1
+                add_margin = 0.05
+                horizontal_list, free_list = group_text_box_vertical_custom1(text_box, slope_ths,
+                                                                             xcenter_ths, height_ths,
+                                                                             width_ths, add_margin,
+                                                                             (optimal_num_chars is None))
+            elif vertical and postprocess == 'vertical_custom2':  # best condition
+                slope_ths = 0.15
+                horizontal_list, free_list = get_horizontal_text_and_free_list(
+                    text_box, slope_ths, add_margin, (optimal_num_chars is None)
+                )
+                horizontal_list = group_text_box_vertical_custom2(horizontal_list)
             else:
-                horizontal_list, free_list = group_text_box_vertical(text_box, slope_ths,
-                                                            ycenter_ths, height_ths,
-                                                            width_ths, add_margin,
-                                                            (optimal_num_chars is None))
+                raise ValueError()
 
             if min_size:
                 horizontal_list = [i for i in horizontal_list if max(

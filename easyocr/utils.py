@@ -1,4 +1,4 @@
-from __future__ import print_function
+from __future__ import annotations, print_function
 
 import torch
 import pickle
@@ -8,7 +8,10 @@ import cv2
 from PIL import Image, JpegImagePlugin
 from scipy import ndimage
 import hashlib
-import sys, os
+import os
+import statistics
+import sys
+from typing import Any, Dict, List, Tuple
 from zipfile import ZipFile
 from .imgproc import loadImage
 
@@ -620,6 +623,332 @@ def group_text_box_vertical(polys, slope_ths = 0.1, ycenter_ths = 0.5, height_th
     # may need to check if box is really in image
     return merged_list, free_list
 
+def group_text_box_vertical_custom1(polys, slope_ths=0.1, xcenter_ths=0.2, height_ths=1.0, width_ths=0.5, add_margin=0.05, sort_output=True):
+    # poly top-left, top-right, low-right, low-left
+    vertical_list, free_list, combined_list, merged_list = [], [], [], []
+
+    for poly in polys:
+        slope_up = (poly[3]-poly[1])/np.maximum(10, (poly[2]-poly[0]))
+        slope_down = (poly[5]-poly[7])/np.maximum(10, (poly[4]-poly[6]))
+        if max(abs(slope_up), abs(slope_down)) < slope_ths:
+            x_max = max([poly[0],poly[2],poly[4],poly[6]])
+            x_min = min([poly[0],poly[2],poly[4],poly[6]])
+            y_max = max([poly[1],poly[3],poly[5],poly[7]])
+            y_min = min([poly[1],poly[3],poly[5],poly[7]])
+            vertical_list.append([x_min, x_max, y_min, y_max, 0.5*(x_min+x_max), x_max-x_min])
+        else:
+            height = np.linalg.norm([poly[6]-poly[0],poly[7]-poly[1]])
+            width = np.linalg.norm([poly[2]-poly[0],poly[3]-poly[1]])
+
+            margin = int(1.44*add_margin*min(width, height))
+
+            theta13 = abs(np.arctan( (poly[1]-poly[5])/np.maximum(10, (poly[0]-poly[4]))))
+            theta24 = abs(np.arctan( (poly[3]-poly[7])/np.maximum(10, (poly[2]-poly[6]))))
+            # do I need to clip minimum, maximum value here?
+            x1 = poly[0] - np.cos(theta13)*margin
+            y1 = poly[1] - np.sin(theta13)*margin
+            x2 = poly[2] + np.cos(theta24)*margin
+            y2 = poly[3] - np.sin(theta24)*margin
+            x3 = poly[4] + np.cos(theta13)*margin
+            y3 = poly[5] + np.sin(theta13)*margin
+            x4 = poly[6] - np.cos(theta24)*margin
+            y4 = poly[7] + np.sin(theta24)*margin
+
+            free_list.append([[x1,y1],[x2,y2],[x3,y3],[x4,y4]])
+    if sort_output:
+        vertical_list = sorted(vertical_list, key=lambda item: item[4])
+
+    # combine box
+    new_box = []
+    for poly in vertical_list:
+        # poly: x_min, x_max, y_min, y_max, 0.5*(x_min+x_max), x_max-x_min
+
+        if len(new_box) == 0:
+            b_width = [poly[5]]
+            b_xcenter = [poly[4]]
+            b_y_min = [poly[2]]
+            b_y_max = [poly[3]]
+            new_box.append(poly)
+        else:
+            # comparable width and comparable x_center level up to ths*width
+            if abs(np.mean(b_xcenter) - poly[4]) < xcenter_ths*np.mean(b_width):
+                b_width.append(poly[5])
+                b_xcenter.append(poly[4])
+                b_y_min.append(poly[2])
+                b_y_max.append(poly[3])
+                new_box.append(poly)
+            else:
+                b_width = [poly[5]]
+                b_xcenter = [poly[4]]
+                b_y_min = [poly[2]]
+                b_y_max = [poly[3]]
+                combined_list.append(new_box)
+                new_box = [poly]
+    combined_list.append(new_box)
+
+    # merge list use sort again
+    for boxes in combined_list:
+        if len(boxes) == 1: # one box per line
+            box = boxes[0]
+            margin = int(add_margin*min(box[3]-box[2],box[5]))
+            merged_list.append([box[0]-margin,box[1]+margin,box[2]-margin,box[3]+margin])
+        else: # multiple boxes per line
+            boxes = sorted(boxes, key=lambda item: item[0])
+
+            merged_box, new_box = [], []
+            for box in boxes:
+                if len(new_box) == 0:
+                    b_width = [box[5]]
+                    y_max = box[3]
+                    new_box.append(box)
+                else:
+                    if (
+                        (abs(np.mean(b_width) - box[5]) < width_ths * np.mean(b_width)) and
+                        ((box[2] - y_max) < height_ths * (box[1] - box[0]))
+                    ):  # merge boxes
+                        b_width.append(box[5])
+                        y_max = box[3]
+                        new_box.append(box)
+                    else:
+                        b_width = [box[5]]
+                        y_max = box[3]
+                        merged_box.append(new_box)
+                        new_box = [box]
+            if len(new_box) >0: merged_box.append(new_box)
+
+            for mbox in merged_box:
+                if len(mbox) != 1: # adjacent box in same line
+                    # do I need to add margin here?
+                    x_min = min(mbox, key=lambda x: x[0])[0]
+                    x_max = max(mbox, key=lambda x: x[1])[1]
+                    y_min = min(mbox, key=lambda x: x[2])[2]
+                    y_max = max(mbox, key=lambda x: x[3])[3]
+
+                    box_width = x_max - x_min
+                    box_height = y_max - y_min
+                    margin = int(add_margin * (min(box_width, box_height)))
+
+                    merged_list.append([x_min-margin, x_max+margin, y_min-margin, y_max+margin])
+                else: # non adjacent box in same line
+                    box = mbox[0]
+
+                    box_width = box[1] - box[0]
+                    box_height = box[3] - box[2]
+                    margin = int(add_margin * (min(box_width, box_height)))
+
+                    merged_list.append([box[0]-margin,box[1]+margin,box[2]-margin,box[3]+margin])
+    # may need to check if box is really in image
+    return merged_list, free_list
+
+def group_text_box_vertical_custom2(horizontal_list):
+    sizes = []
+    for ext_bbox in horizontal_list:
+        x_min, x_max, y_min, y_max = ext_bbox[:4]
+        height = y_max - y_min
+        width = x_max - x_min
+        sizes.append(height * width)
+
+    mean_size = statistics.mean(sizes)
+    max_size = max(sizes)
+    standard_square_bboxes = []
+    for h_idx, ext_bbox in enumerate(horizontal_list):
+        x_min, x_max, y_min, y_max = ext_bbox[:4]
+        height = y_max - y_min
+        width = x_max - x_min
+        size = height * width
+        if (
+            width / height <= 2.0 and
+            size < 0.9 * max_size
+            # 0.1 * mean_size <= size < 0.9 * max_size
+        ):
+            standard_square_bboxes.append((h_idx, [x_min, x_max, y_min, y_max]))
+
+    sorted_standard_square_bboxes = sorted(standard_square_bboxes, key=lambda x: 0.5 * (x[1][2] + x[1][3]))
+    mapping = {}
+    for h_idx1, square_bbox1 in sorted_standard_square_bboxes:
+        square_x_center_1 = (square_bbox1[0] + square_bbox1[1]) / 2
+        square_height_1 = square_bbox1[3] - square_bbox1[2]
+        square_width_1 = square_bbox1[1] - square_bbox1[0]
+
+        vertical_nearest_h_idx = None
+        vertical_nearest_bbox = None
+        min_vertical_diff = 9999
+        for h_idx2, square_bbox2 in sorted_standard_square_bboxes:
+            if h_idx2 <= h_idx1:
+                continue
+
+            square_x_center_2 = (square_bbox2[0] + square_bbox2[1]) / 2
+            square_width_2 = square_bbox2[1] - square_bbox2[0]
+            if (
+                square_bbox2[0] < square_x_center_1 < square_bbox2[1] and
+                square_bbox1[0] < square_x_center_2 < square_bbox1[1] and
+                abs(square_x_center_1 - square_x_center_2) < 0.2 * min(square_width_1, square_width_2)
+            ):
+                vertical_diff = square_bbox2[2] - square_bbox1[3]
+                if -100 < vertical_diff < min_vertical_diff:
+                    min_vertical_diff = vertical_diff
+                    vertical_nearest_h_idx = h_idx2
+                    vertical_nearest_bbox = square_bbox2
+
+        if vertical_nearest_h_idx and vertical_nearest_bbox:
+            nearest_square_height = vertical_nearest_bbox[3] - vertical_nearest_bbox[2]
+            small_height = min(square_height_1, nearest_square_height)
+            if min_vertical_diff < 1.0 * small_height:
+                mapping[h_idx1] = vertical_nearest_h_idx
+
+    connected_indices_group = []
+    cache = []
+    for upper_idx, below_idx in mapping.items():
+        if upper_idx in cache:
+            continue
+
+        connected_indices = [upper_idx, below_idx]
+        cache.append(upper_idx)
+        cache.append(below_idx)
+        for _ in range(100):
+            next_below_idx = mapping.get(below_idx, -1)
+            if next_below_idx == -1:
+                break
+
+            connected_indices.append(next_below_idx)
+            below_idx = next_below_idx
+            cache.append(next_below_idx)
+
+        connected_indices_group.append(connected_indices)
+
+    grouped_bboxes = []
+    for connected_indices in connected_indices_group:
+        # connection
+        min_x = 9999
+        min_y = 9999
+        max_x = -1
+        max_y = -1
+
+        # base
+        base_height = 9999
+        base_stat = None
+        for h_idx in connected_indices:
+            x_min, x_max, y_min, y_max = horizontal_list[h_idx][: 4]
+            # connection
+            if x_min < min_x:
+                min_x = x_min
+            if y_min < min_y:
+                min_y = y_min
+            if max_x < x_max:
+                max_x = x_max
+            if max_y < y_max:
+                max_y = y_max
+
+            # base
+            if y_max - y_min < base_height:
+                base_height = y_max - y_min
+                base_stat = horizontal_list[h_idx]
+
+        connected_height = max_y - min_y
+        if connected_height <= 2.5 * base_stat[5]:
+            [cache.remove(h_idx) for h_idx in connected_indices]
+            continue
+
+        grouped_bboxes.append([min_x, max_x, min_y, max_y, 0.5 * (min_y + max_y), connected_height])
+
+    # Create new horizontal list
+    # new_horizontal_list = [horizontal for h_idx, horizontal in enumerate(horizontal_list) if h_idx not in cache]
+
+    grouped_rects = []
+    for grouped_bbox in grouped_bboxes:
+        grouped_rects.append(
+            Rect(
+                left=grouped_bbox[0],
+                top=grouped_bbox[2],
+                right=grouped_bbox[1],
+                bottom=grouped_bbox[3],
+            )
+        )
+    new_horizontal_list = []
+    for horizontal in horizontal_list:
+        horizontal_rect = Rect(
+            left=horizontal[0],
+            top=horizontal[2],
+            right=horizontal[1],
+            bottom=horizontal[3],
+        )
+        is_included_in_grouping = False
+        for grouped_rect in grouped_rects:
+            if horizontal_rect.is_inside_of(grouped_rect):
+                is_included_in_grouping = True
+                break
+
+        if not is_included_in_grouping:
+            new_horizontal_list.append(horizontal)
+
+    new_horizontal_list.extend(grouped_bboxes)
+    new_horizontal_list = sorted(new_horizontal_list, key=lambda x: x[4])
+    return new_horizontal_list
+
+
+def get_horizontal_text_and_free_list(polys, slope_ths=0.1, add_margin=0.05, sort_output=True):
+    # poly top-left, top-right, low-right, low-left
+    horizontal_list, free_list = [], []
+
+    for poly in polys:
+        slope_up = (poly[3] - poly[1]) / np.maximum(10, (poly[2] - poly[0]))
+        slope_down = (poly[5] - poly[7]) / np.maximum(10, (poly[4] - poly[6]))
+        if max(abs(slope_up), abs(slope_down)) < slope_ths:
+            x_max = max([poly[0], poly[2], poly[4], poly[6]])
+            x_min = min([poly[0], poly[2], poly[4], poly[6]])
+            y_max = max([poly[1], poly[3], poly[5], poly[7]])
+            y_min = min([poly[1], poly[3], poly[5], poly[7]])
+            horizontal_list.append([x_min, x_max, y_min, y_max, 0.5 * (y_min + y_max), y_max - y_min])
+        else:
+            height = np.linalg.norm([poly[6] - poly[0], poly[7] - poly[1]])
+            width = np.linalg.norm([poly[2] - poly[0], poly[3] - poly[1]])
+
+            margin = int(1.44 * add_margin * min(width, height))
+
+            theta13 = abs(np.arctan((poly[1] - poly[5]) / np.maximum(10, (poly[0] - poly[4]))))
+            theta24 = abs(np.arctan((poly[3] - poly[7]) / np.maximum(10, (poly[2] - poly[6]))))
+            # do I need to clip minimum, maximum value here?
+            x1 = poly[0] - np.cos(theta13) * margin
+            y1 = poly[1] - np.sin(theta13) * margin
+            x2 = poly[2] + np.cos(theta24) * margin
+            y2 = poly[3] - np.sin(theta24) * margin
+            x3 = poly[4] + np.cos(theta13) * margin
+            y3 = poly[5] + np.sin(theta13) * margin
+            x4 = poly[6] - np.cos(theta24) * margin
+            y4 = poly[7] + np.sin(theta24) * margin
+
+            free_list.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
+    if sort_output:
+        horizontal_list = sorted(horizontal_list, key=lambda item: item[4])
+
+    return horizontal_list, free_list
+
+def get_free_list(polys, add_margin=0.05):
+    # poly top-left, top-right, low-right, low-left
+    free_list = []
+
+    for poly in polys:
+        height = np.linalg.norm([poly[6] - poly[0], poly[7] - poly[1]])
+        width = np.linalg.norm([poly[2] - poly[0], poly[3] - poly[1]])
+
+        margin = int(1.44 * add_margin * min(width, height))
+
+        theta13 = abs(np.arctan((poly[1] - poly[5]) / np.maximum(10, (poly[0] - poly[4]))))
+        theta24 = abs(np.arctan((poly[3] - poly[7]) / np.maximum(10, (poly[2] - poly[6]))))
+        # do I need to clip minimum, maximum value here?
+        x1 = poly[0] - np.cos(theta13) * margin
+        y1 = poly[1] - np.sin(theta13) * margin
+        x2 = poly[2] + np.cos(theta24) * margin
+        y2 = poly[3] - np.sin(theta24) * margin
+        x3 = poly[4] + np.cos(theta13) * margin
+        y3 = poly[5] + np.sin(theta13) * margin
+        x4 = poly[6] - np.cos(theta24) * margin
+        y4 = poly[7] + np.sin(theta24) * margin
+
+        free_list.append([[x1, y1], [x2, y2], [x3, y3], [x4, y4]])
+
+    return [], free_list
+
 def calculate_ratio(width,height):
     '''
     Calculate aspect ratio for normal use case (w>h) and vertical text (h>w)
@@ -954,3 +1283,244 @@ def set_result_with_confidence(results):
         final_result.append(results[best_row][col_ix])
 
     return final_result
+
+
+class Rect(object):
+
+    _OVERLAP_RATIO: float = 0.90
+
+    def __init__(self, left: int, top: int, right: int, bottom: int):
+        self._left = left
+        self._top = top
+        self._right = right
+        self._bottom = bottom
+
+        self._attribute = {}
+
+    def is_overlapped(self, rect: Rect) -> bool:
+        if self.has_same_height(rect) and self.has_same_width(rect):
+            return True
+
+        return False
+
+    def _has_same_delta(self, rect: Rect, delta_type: str) -> bool:
+        t1, t2 = {'width': ('bottom', 'top'), 'height': ('right', 'left')}[delta_type]
+
+        if getattr(rect, t1) < getattr(self, t2):
+            return False
+        if getattr(self, t1) < getattr(rect, t2):
+            return False
+
+        d1 = min(getattr(self, t1), getattr(rect, t1))
+        d2 = max(getattr(self, t2), getattr(rect, t2))
+        delta = d1 - d2
+
+        s_overlapped_ratio = delta / getattr(self, delta_type)
+        r_overlapped_ratio = delta / getattr(rect, delta_type)
+        if s_overlapped_ratio > self._OVERLAP_RATIO and r_overlapped_ratio > self._OVERLAP_RATIO:
+            return True
+
+        return False
+
+    def has_same_width(self, rect: Rect) -> bool:
+        return self._has_same_delta(rect, 'width')
+
+    def has_same_height(self, rect: Rect) -> bool:
+        return self._has_same_delta(rect, 'height')
+
+    def is_inside_of(self, rect: Rect, tolerance: int = 2) -> bool:
+        top_is_in = rect.top < self.top + tolerance
+        bottom_is_in = rect.bottom + tolerance > self.bottom
+        left_is_in = rect.left < self.left + tolerance
+        right_is_in = rect.right + tolerance > self.right
+        if top_is_in and bottom_is_in and left_is_in and right_is_in:
+            return True
+
+        return False
+
+    @classmethod
+    def calc_iou(cls, rect_1: Rect, rect_2: Rect) -> float:
+        """
+        Returns
+        -------
+        float
+            in [0, 1]
+        """
+        if rect_2.left < rect_1.left:
+            rect_1, rect_2 = rect_2, rect_1
+
+        # intersection area
+        intersection_area = cls.calc_intersection_area(rect_1, rect_2)
+
+        # union area
+        union_area = cls.calc_union_area(rect_1, rect_2, intersection_area)
+
+        iou = intersection_area / union_area
+        assert 0.0 <= iou <= 1.0
+        return iou
+
+    @classmethod
+    def calc_intersection_area(cls, rect_1: Rect, rect_2: Rect) -> float:
+        x_left = max(rect_1.left, rect_2.left)
+        y_top = max(rect_1.top, rect_2.top)
+        x_right = min(rect_1.right, rect_2.right)
+        y_bottom = min(rect_1.bottom, rect_2.bottom)
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        return intersection_area
+
+    @classmethod
+    def calc_union_area(cls, rect_1: Rect, rect_2: Rect, intersection_area: float) -> float:
+        rect_1_area = (rect_1.right - rect_1.left) * (rect_1.bottom - rect_1.top)
+        rect_2_area = (rect_2.right - rect_2.left) * (rect_2.bottom - rect_2.top)
+        return rect_1_area + rect_2_area - intersection_area
+
+    def is_line(self) -> bool:
+        if self._bottom - self._top < 5:
+            return True
+        if self._right - self._left < 5:
+            return True
+
+        return False
+
+    def change_scale(self, scale: float) -> Rect:
+        self._left = round(self._left * scale)
+        self._top = round(self._top * scale)
+        self._right = round(self._right * scale)
+        self._bottom = round(self._bottom * scale)
+        return self
+
+    @staticmethod
+    def get_overlapped_edges(parent_rect: Rect, child_rect: Rect) -> List[str]:
+        """
+        #### t ####
+        #         #
+        l         r
+        #         #
+        #### b ####
+        """
+        overlapped_edges = []
+        # left (l)
+        if (
+            child_rect.left <= parent_rect.left <= child_rect.right and
+            parent_rect.top <= child_rect.top <= child_rect.bottom <= parent_rect.bottom
+        ):
+            overlapped_edges.append('l')
+
+        # right (r)
+        if (
+            child_rect.left <= parent_rect.right <= child_rect.right and
+            parent_rect.top <= child_rect.top <= child_rect.bottom <= parent_rect.bottom
+        ):
+            overlapped_edges.append('r')
+
+        # top (t)
+        if (
+            child_rect.top <= parent_rect.top <= child_rect.bottom and
+            parent_rect.left <= child_rect.left <= child_rect.right <= parent_rect.right
+        ):
+            overlapped_edges.append('t')
+
+        # bottom (b)
+        if (
+            child_rect.top <= parent_rect.bottom <= child_rect.bottom and
+            parent_rect.left <= child_rect.left <= child_rect.right <= parent_rect.right
+        ):
+            overlapped_edges.append('b')
+
+        return overlapped_edges
+
+    @property
+    def width(self) -> int:
+        return self._right - self._left
+
+    @property
+    def height(self) -> int:
+        return self._bottom - self._top
+
+    @property
+    def left(self) -> int:
+        return self._left
+
+    @property
+    def right(self) -> int:
+        return self._right
+
+    @property
+    def top(self) -> int:
+        return self._top
+
+    @property
+    def bottom(self) -> int:
+        return self._bottom
+
+    @property
+    def lt(self) -> Tuple[int, int]:
+        return self.left, self.top
+
+    @property
+    def rb(self) -> Tuple[int, int]:
+        return self.right, self.bottom
+
+    @property
+    def x_center(self) -> int:
+        return int(self.left + self.width / 2)
+
+    @property
+    def y_center(self) -> int:
+        return int(self.top + self.height / 2)
+
+    @property
+    def center_point(self) -> Tuple[int, int]:
+        return self.x_center, self.y_center
+
+    @property
+    def area(self) -> int:
+        return self.width * self.height
+
+    @property
+    def bbox(self) -> Tuple[int, int, int, int]:
+        return self.left, self.top, self.right, self.bottom
+
+    @property
+    def attribute(self) -> Dict[str, Any]:
+        return self._attribute
+
+    def set_re_coordinate(self, coordinate: str, value: int) -> None:
+        setattr(self, f"_{coordinate}", value)
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        self._attribute[key] = value
+
+    def as_dict(self) -> Dict:
+        return {
+            'left': self._left,
+            'right': self._right,
+            'top': self._top,
+            'bottom': self._bottom,
+        }
+
+
+def get_intersection_bbox(rect_1: Rect, rect_2: Rect):
+    ist_left = max(rect_1.left, rect_2.left)
+    ist_top = max(rect_1.top, rect_2.top)
+    ist_right = min(rect_1.right, rect_2.right)
+    ist_bottom = min(rect_1.bottom, rect_2.bottom)
+    return ist_left, ist_top, ist_right, ist_bottom
+
+
+def get_horizontal_iou_1_dim(line_1, line_2):
+    # intersection
+    its_left = max(line_1[0], line_2[0])
+    its_right = min(line_1[1], line_2[1])
+    if its_left >= its_right:
+        return 0.0
+
+    # union
+    uni_left = min(line_1[0], line_2[0])
+    uni_right = max(line_1[1], line_2[1])
+    if uni_left >= uni_right:
+        return 0.0
+
+    return (its_right - its_left) / (uni_right - uni_left)
