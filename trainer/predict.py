@@ -21,7 +21,8 @@ class Predictor():
                  model_storage_directory=None,
                  user_network_directory=None,
                  gpu=True,
-                 trim_quotes=True):
+                 trim_quotes=True,
+                 pred_format=True):
         self.model = self.load_model(
             lang_list=lang_list,
             gpu=gpu,
@@ -30,6 +31,7 @@ class Predictor():
             user_network_directory=user_network_directory
             )
         self.trim_quotes = trim_quotes
+        self.pred_format = pred_format
 
     def gen_reader(self,
                 lang_list,
@@ -75,20 +77,31 @@ class Predictor():
             x2 = int(max(p[0] for p in points))
             y2 = int(max(p[1] for p in points))
 
-            attributes = [{
-                'type': 'text',
-                'name': 'text',
-                'key': 'text',
-                'value': word
-            }]
 
-            annotations.append({
-                'type': 'bbox',
-                'value': 'str',
-                'attributes': attributes,
-                'points': [x1, y1, x2, y2],
-                'confidence': conf
-            })
+            if self.pred_format:
+                annotations.append({
+                    'type': 'bbox',
+                    'confidence': conf,
+                    'points': [x1, y1, x2, y2],
+                    'text':word,
+                    'symbols':[]
+                })
+            else:
+
+                attributes = [{
+                    'type': 'text',
+                    'name': 'text',
+                    'key': 'text',
+                    'value': word
+                }]
+
+                annotations.append({
+                    'type': 'bbox',
+                    'value': 'str',
+                    'attributes': attributes,
+                    'points': [x1, y1, x2, y2],
+                    'confidence': conf
+                })
 
         return annotations
 
@@ -153,6 +166,8 @@ if __name__ == '__main__':
                         type=str, default=None)
     parser.add_argument('-g', '--gpu', action='store_true', default=False)
     parser.add_argument('-t', '--trim_quotes', action='store_true', default=False)
+    parser.add_argument('-s', '--single_unit', action='store_true', default=False)
+    parser.add_argument('-f', '--pred_format', action='store_true', default=True)
     parser.add_argument('--visualize', action='store_true', default=False)
 
     args = parser.parse_args()
@@ -163,16 +178,31 @@ if __name__ == '__main__':
                 model_storage_directory=args.model_storage_directory,
                 user_network_directory=args.user_network_directory,
                 gpu=args.gpu,
-                trim_quotes=args.trim_quotes)
+                trim_quotes=args.trim_quotes,
+                pred_format=args.pred_format
+                )
 
     n_input = len(glob.glob(args.input))
 
     if n_input > 1:
-        result = model.run_batch(args.input, args.output, args.visualize)
+        if args.single_unit:
+            #タスク単位でjsonを出力する
+            for img_path in glob.glob(args.input):
+                fname = os.path.splitext(os.path.basename(img_path))[0] + '.json'
+                result = model.run_single_image(img_path)
+                if args.output:
+                    os.makedirs(args.output, exist_ok=True)
+                    with open(os.path.join(args.output, fname), 'w') as f:
+                        json.dump(result, f, indent=4, ensure_ascii=False)
+
+        else:
+            result = model.run_batch(args.input, args.output, args.visualize)
+
     elif n_input == 1:
         result = model.run_single_image(args.input)
 
         if args.output:
+            os.makedirs(args.output, exist_ok=True)
             with open(args.output, 'w') as f:
                 json.dump(result, f, indent=4, ensure_ascii=False)
     else :
