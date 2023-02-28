@@ -740,7 +740,7 @@ def group_text_box_vertical_custom1(polys, slope_ths=0.1, xcenter_ths=0.2, heigh
     # may need to check if box is really in image
     return merged_list, free_list
 
-def group_text_box_vertical_custom2(horizontal_list):
+def group_text_box_vertical_custom2(horizontal_list, vertical_height_th: int = 80):
     sizes = []
     for ext_bbox in horizontal_list:
         x_min, x_max, y_min, y_max = ext_bbox[:4]
@@ -793,7 +793,14 @@ def group_text_box_vertical_custom2(horizontal_list):
         if vertical_nearest_h_idx and vertical_nearest_bbox:
             nearest_square_height = vertical_nearest_bbox[3] - vertical_nearest_bbox[2]
             small_height = min(square_height_1, nearest_square_height)
-            if min_vertical_diff < 1.0 * small_height:
+            vertical_height_diff = max(
+                square_bbox1[2] - vertical_nearest_bbox[3],
+                vertical_nearest_bbox[2] - square_bbox1[3],
+            )
+            if (
+                min_vertical_diff < 1.0 * small_height and
+                vertical_height_diff < vertical_height_th
+            ):
                 mapping[h_idx1] = vertical_nearest_h_idx
 
     connected_indices_group = []
